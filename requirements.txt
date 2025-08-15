@@ -1,0 +1,5 @@
+flask
+playwright
+playwright-stealth
+requests
+html2text
