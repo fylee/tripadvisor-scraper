@@ -5,8 +5,6 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 from urllib.parse import urljoin
-import time
-import re
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -198,11 +196,19 @@ def parse_current_page(page, debug_dir: Optional[Path], page_idx: int, target: s
         title = None
 
         # 1) New TA markup seen in your screenshot
-        loc = card.locator("a[href*='ShowUserReviews'] span, span.yCeTE").first
+        loc = card.locator("a[href*='ShowUserReviews'], span.yCeTE").first
         if loc.count():
             title = (loc.text_content() or "").strip()
             print(f"[DEBUG] Found title in new markup: {title!r}")
 
+
+        # 2) Foods 方案：直接抓 <a> 本身的文字（像你 screenshot 看到的 Beautiful setting!）
+        if not title:
+            loc2 = card.locator("a[href*='ShowUserReviews']").first
+            if loc2.count():
+                title = (loc2.text_content() or "").strip()
+                print(f"[DEBUG] Found title in <a>: {title!r}")
+                
         # 2) Fallbacks (older markups)
         if not title:
             for sel in [
@@ -411,6 +417,7 @@ def parse_current_page(page, debug_dir: Optional[Path], page_idx: int, target: s
         except Exception:
             pass
 
+
         # contribution/helpful
         contribution_count = None; helpful_votes = None
         try:
@@ -586,9 +593,6 @@ def click_next_page(page) -> bool:
             after_key = first_card_key(page)
             if (after_key and after_key != before_key) or (page.url != before_url):
                 return True
-            print(f"[DEBUG] Clicked {sel}, but content did not change.")
-            print(f"[DEBUG] Before key: {before_key}, After key: {after_key}")
-            print(f"[DEBUG] Before URL: {before_url}, After URL: {page.url}")
 
         except Exception as e:
             print(f"[WARN] next click failed via {sel}: {e}")
@@ -640,55 +644,27 @@ def run_same_context(target: str, max_pages: int, timeout_ms: int, debug_dir: Op
         # 防止 Lazyload：先滾幾次
         for _ in range(5):
             human_scroll(page, steps=2)
-        
 
-        def get_attraction_name(page) -> str:
-            # 1) 首選：mainH1，只取名稱文字並去掉 Unclaimed/宣傳字樣
-            try:
-                h1 = page.locator("h1[data-test-target='mainH1']").first
+        # 取得景點名稱
+        attraction = None
+        try:
+            h1 = page.locator("h1[data-test-target='mainH1']")
+            if h1.count():
+                main_span = h1.first.locator("span").first
+                if main_span.count():
+                    attraction = (main_span.text_content() or "").strip()
+                else:
+                    raw = h1.first.inner_text() or ""
+                    attraction = raw.split("Unclaimed")[0].strip()
+            else:
+                h1 = page.locator("h1")
                 if h1.count():
-                    # 優先取 h1 直接子層第一個 span 的文字（通常就是名稱）
-                    name = (h1.locator(":scope > span").first.text_content() or "").strip()
-                    if not name:
-                        # 若拿不到，就退回 h1 的純文字
-                        name = (h1.text_content() or "").strip()
-
-                    # 移除 Unclaimed / Claim this listing 等 boilerplate
-                    name = re.split(r"\bUnclaimed\b", name, maxsplit=1)[0]
-                    name = re.sub(r"If you own this business.*$", "", name, flags=re.S)
-                    name = re.sub(r"Claim this listing.*$", "", name, flags=re.S)
-                    name = re.sub(r"\s+", " ", name).strip()
-                    if name:
-                        return name
-            except Exception:
-                pass
-
-            # 2) 後備：meta og:title，例如 "Kuang Si Falls - Reviews ..."
-            try:
-                og = page.locator("meta[property='og:title']").first
-                if og.count():
-                    content = og.get_attribute("content") or ""
-                    # 切掉 "- Reviews" 或類似尾巴
-                    name = re.split(r"\s*[-–]\s*Reviews", content, maxsplit=1)[0].strip()
-                    if name:
-                        return name
-            except Exception:
-                pass
-
-            # 3) 再後備：<title>
-            try:
-                t = page.title() or ""
-                name = re.split(r"\s*[-–]\s*Reviews", t, maxsplit=1)[0].strip()
-                if name:
-                    return name
-            except Exception:
-                pass
-
-            return "(unknown)"
-
-        # 使用：
-        attraction = get_attraction_name(page)
-
+                    raw = h1.first.inner_text() or ""
+                    attraction = raw.split("Unclaimed")[0].strip()
+        except Exception as e:
+            print(f"[WARN] 景點名稱擷取失敗: {e}")
+        if not attraction:
+            attraction = "(unknown)"
 
         # 2) 同一個 page 直接開始爬
         all_reviews: List[Dict[str, Any]] = []
@@ -720,10 +696,6 @@ def run_same_context(target: str, max_pages: int, timeout_ms: int, debug_dir: Op
             # —— 嘗試翻頁
             before_key = first_card_key(page)
             moved = click_next_page(page)
-            # sleep 3 seconds
-            
-
-            time.sleep(3)  # sleep for 3 seconds
 
             if not moved:
                 print("[INFO] Next click not effective, stop.")
@@ -737,7 +709,6 @@ def run_same_context(target: str, max_pages: int, timeout_ms: int, debug_dir: Op
                 same_count = 0
             if same_count >= 2:
                 print("[INFO] Page content not changing across next attempts. Stop.")
-                print(f"[DEBUG] Before key: {before_key}, After key: {after_key}")
                 break
 
             # 也可避免 URL 迴圈
@@ -774,7 +745,7 @@ def cli():
     import json
 
     base_url = ""
-    json_path = Path("./TripAdv_Atts_list.json").resolve()
+    json_path = Path("./TripAdv_Foods_List.json").resolve()
 
     # 載入 JSON
     with open(json_path, "r", encoding="utf-8") as f:
@@ -784,16 +755,16 @@ def cli():
         print(f"[ERROR] JSON 應該是 list，但得到 {type(urls)}")
         sys.exit(1)
 
-    debug_dir = Path("debug_shots_att").resolve()
-    out_json  = Path("reviews_att.json").resolve()
-    out_csv   = Path("reviews_att.csv").resolve()
+    debug_dir = Path("debug_shots_food").resolve()
+    out_json  = Path("reviews_food.json").resolve()
+    out_csv   = Path("reviews_food.csv").resolve()
 
     print(f"[INFO] CWD={os.getcwd()}")
     print(f"[INFO] debug_dir={debug_dir}")
     print(f"[INFO] out_json={out_json}")
     print(f"[INFO] out_csv={out_csv}")
 
-    processed_path = Path("processed_urls_att.txt").resolve()
+    processed_path = Path("processed_urls_food.txt").resolve()
     # 讀取已處理過的 URL
     processed = set()
     if processed_path.exists():
@@ -837,12 +808,9 @@ def cli():
 
         for rel_path in urls:
             full_url = base_url + rel_path
-            if full_url in processed:
+            
+            if full_url in processed or "#REVIEWS" in full_url:
                 print(f"[SKIP] 已處理過: {full_url}")
-                continue
-            # if url does not contains Luang_Prabang, skip
-            if "Luang_Prabang" not in full_url:
-                print(f"[SKIP] 不包含 Luang_Prabang: {full_url}")
                 continue
             print(f"[INFO] 處理 URL: {full_url}")
             
@@ -867,7 +835,6 @@ def cli():
                 pf.write(full_url + "\n")
             
         browser.close()
-
     print(f"[DONE] 所有 URL 處理完畢。結果已追加到 {out_csv}")
 
 
